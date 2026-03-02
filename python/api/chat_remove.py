@@ -4,6 +4,29 @@ from python.helpers import persist_chat
 from python.helpers.task_scheduler import TaskScheduler
 
 
+def _clear_monitor_state(ctxid: str):
+    """Remove a context_id from matrix_monitor_state.json if present.
+    This prevents deleted chats from being recreated as zombies when
+    the Matrix monitor sends the next message for that room."""
+    import json, os
+    state_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "usr", "workdir", "matrix_monitor_state.json")
+    if not os.path.exists(state_path):
+        return
+    try:
+        with open(state_path, "r") as f:
+            state = json.load(f)
+        user_contexts = state.get("user_contexts", {})
+        keys_to_remove = [k for k, v in user_contexts.items() if v.get("context_id") == ctxid]
+        if not keys_to_remove:
+            return
+        for key in keys_to_remove:
+            del user_contexts[key]
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"[chat_remove] Warning: failed to clear monitor state for {ctxid}: {e}")
+
+
 class RemoveChat(ApiHandler):
     async def process(self, input: Input, request: Request) -> Output:
         ctxid = input.get("context", "")
@@ -18,6 +41,9 @@ class RemoveChat(ApiHandler):
 
         AgentContext.remove(ctxid)
         persist_chat.remove_chat(ctxid)
+
+        # Clear from matrix monitor state to prevent zombie recreation
+        _clear_monitor_state(ctxid)
 
         await scheduler.reload()
 

@@ -123,6 +123,8 @@ def initialize_chats():
     from python.helpers import persist_chat
     async def initialize_chats_async():
         persist_chat.load_tmp_chats()
+        persist_chat.reconcile_monitor_state()
+        persist_chat.start_autosave()
     return defer.DeferredTask().start_task(initialize_chats_async)
 
 def initialize_mcp():

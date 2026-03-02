@@ -33,7 +33,7 @@ class ApiMessage(ApiHandler):
         context_id = input.get("context_id", "")
         message = input.get("message", "")
         attachments = input.get("attachments", [])
-        lifetime_hours = input.get("lifetime_hours", 24)  # Default 24 hours
+        lifetime_hours = input.get("lifetime_hours", 0)  # Default 0 = no expiry
         project_name = input.get("project_name", None)
         agent_profile = input.get("agent_profile", None)
         
@@ -78,7 +78,11 @@ class ApiMessage(ApiHandler):
         if context_id:
             context = AgentContext.use(context_id)
             if not context:
-                return Response('{"error": "Context not found"}', status=404, mimetype="application/json")
+                # Context not in memory (e.g. after restart) - recreate with same ID
+                # This preserves chat history stored on disk
+                config = initialize_agent(override_settings=override_settings)
+                context = AgentContext(config=config, id=context_id, type=AgentContextType.USER)
+                AgentContext.use(context.id)
 
             # Validation: if agent profile is provided, it must match the exising
             if agent_profile and context.agent0.config.profile != agent_profile:
@@ -108,16 +112,12 @@ class ApiMessage(ApiHandler):
                         mimetype="application/json",
                     )
 
-            # Activate project if provided
-            if project_name:
-                try:
-                    projects.activate_project(context_id, project_name)
-                except Exception as e:
-                    return Response(f'{{"error": "Failed to activate project: {str(e)}"}}', status=400, mimetype="application/json")
 
-        # Update chat lifetime
-        with self._cleanup_lock:
-            self._chat_lifetimes[context_id] = datetime.now() + timedelta(hours=lifetime_hours)
+
+        # Only track lifetime if explicitly set to a positive value
+        if lifetime_hours and lifetime_hours > 0:
+            with self._cleanup_lock:
+                self._chat_lifetimes[context_id] = datetime.now() + timedelta(hours=lifetime_hours)
 
         # Process message
         try:
@@ -159,7 +159,7 @@ class ApiMessage(ApiHandler):
 
     @classmethod
     def _cleanup_expired_chats(cls):
-        """Clean up expired chats"""
+        """Clean up expired chats (only those with explicitly set lifetime)"""
         with cls._cleanup_lock:
             now = datetime.now()
             expired_contexts = [

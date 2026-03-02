@@ -307,3 +307,116 @@ def _safe_json_serialize(obj, **kwargs):
             return False
 
     return json.dumps(obj, default=serializer, **kwargs)
+
+
+# === Periodic Autosave ===
+# Saves all active contexts to disk every AUTOSAVE_INTERVAL_SECONDS.
+# Prevents context loss on crash/restart between normal save trigger points.
+
+import threading
+import time as _time
+
+AUTOSAVE_INTERVAL_SECONDS = 300  # 5 minutes
+_autosave_thread = None
+_autosave_stop = threading.Event()
+
+
+def _autosave_loop():
+    """Background loop that periodically saves all contexts to disk."""
+    while not _autosave_stop.is_set():
+        _autosave_stop.wait(AUTOSAVE_INTERVAL_SECONDS)
+        if _autosave_stop.is_set():
+            break
+        try:
+            contexts = AgentContext.all()
+            count = 0
+            for context in contexts:
+                if context.type == AgentContextType.BACKGROUND:
+                    continue
+                save_tmp_chat(context)
+                count += 1
+            if count > 0:
+                print(f"[autosave] Saved {count} context(s) to disk.")
+        except Exception as e:
+            print(f"[autosave] Error during periodic save: {e}")
+
+
+def start_autosave():
+    """Start the periodic autosave background thread."""
+    global _autosave_thread
+    if _autosave_thread is not None and _autosave_thread.is_alive():
+        return  # Already running
+    _autosave_stop.clear()
+    _autosave_thread = threading.Thread(target=_autosave_loop, daemon=True, name="autosave")
+    _autosave_thread.start()
+    print(f"[autosave] Started periodic autosave (every {AUTOSAVE_INTERVAL_SECONDS}s).")
+
+
+def stop_autosave():
+    """Stop the periodic autosave background thread."""
+    global _autosave_thread
+    _autosave_stop.set()
+    if _autosave_thread is not None:
+        _autosave_thread.join(timeout=5)
+        _autosave_thread = None
+    print("[autosave] Stopped periodic autosave.")
+
+
+# === Startup Reconciliation ===
+# Removes stale context references from matrix_monitor_state.json
+# that point to contexts not present on disk.
+
+def reconcile_monitor_state():
+    """Cross-check matrix_monitor_state.json against chats on disk.
+    Remove any user_context entries whose context_id has no matching
+    chat folder on disk. This prevents orphaned references from
+    causing issues after restarts."""
+    import json as _json
+    import os as _os
+
+    state_path = _os.path.join(
+        _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+        "usr", "workdir", "matrix_monitor_state.json"
+    )
+    if not _os.path.exists(state_path):
+        return
+
+    try:
+        with open(state_path, "r") as f:
+            state = _json.load(f)
+
+        user_contexts = state.get("user_contexts", {})
+        if not user_contexts:
+            return
+
+        # Get all chat folders on disk
+        chats_base = files.get_abs_path(CHATS_FOLDER)
+        disk_chats = set()
+        if _os.path.exists(chats_base):
+            disk_chats = set(_os.listdir(chats_base))
+
+        # Find stale references
+        keys_to_remove = []
+        for key, val in user_contexts.items():
+            ctx_id = val.get("context_id", "")
+            if ctx_id and ctx_id not in disk_chats:
+                keys_to_remove.append(key)
+
+        if not keys_to_remove:
+            print("[reconcile] Monitor state is consistent with disk.")
+            return
+
+        room_names = state.get("room_names", {})
+        for key in keys_to_remove:
+            room_id = key.split("|")[0]
+            room_name = room_names.get(room_id, "unknown")
+            ctx_id = user_contexts[key]["context_id"]
+            del user_contexts[key]
+            print(f"[reconcile] Removed stale reference: {ctx_id} ({room_name})")
+
+        with open(state_path, "w") as f:
+            _json.dump(state, f, indent=2)
+
+        print(f"[reconcile] Cleaned {len(keys_to_remove)} stale reference(s) from monitor state.")
+    except Exception as e:
+        print(f"[reconcile] Error during reconciliation: {e}")
