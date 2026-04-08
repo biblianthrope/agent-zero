@@ -1,7 +1,6 @@
 import { createStore } from "/js/AlpineStore.js";
 import * as api from "/js/api.js";
-import { marked } from "/vendor/marked/marked.esm.js";
-import { addBlankTargetsToLinks } from "/js/messages.js";
+import { renderSafeMarkdown } from "/js/safe-markdown.js";
 import { store as pluginSettingsStore } from "/components/plugins/plugin-settings-store.js";
 import { store as pluginToggleStore } from "/components/plugins/toggle/plugin-toggle-store.js";
 import { store as pluginExecuteStore } from "/components/plugins/list/plugin-execute-store.js";
@@ -13,6 +12,8 @@ import {
   defaultPriority,
 } from "/components/notifications/notification-store.js";
 
+const MODAL_PATH = "components/plugins/list/plugin-list.html";
+
 // define the model object holding data and functions
 const model = {
   loading: false,
@@ -23,11 +24,22 @@ const model = {
   readmeLoading: false,
   readmeError: "",
 
+  async open(tab = "custom") {
+    await this.setTab(tab);
+    window.openModal?.(MODAL_PATH);
+  },
+
   async init() {
     this.loading = false;
-    await this.setTab('custom');
-    if (this.plugins.length === 0) {
-        await this.setTab('builtin');
+    // If a tab is already selected (e.g. via open()), use it. 
+    // Otherwise default to custom -> builtin fallback.
+    if (this.activeTab && this.activeTab !== "custom") {
+      await this.setTab(this.activeTab);
+    } else {
+      await this.setTab("custom");
+      if (this.plugins.length === 0) {
+        await this.setTab("builtin");
+      }
     }
   },
 
@@ -82,13 +94,21 @@ const model = {
     pluginExecuteStore.open(plugin);
   },
 
-  async openPluginConfig(plugin) {
-    if (!plugin?.name || !plugin?.has_config_screen) return;
+  async openPluginConfig(pluginOrName) {
+    const pluginName =
+      typeof pluginOrName === "string" ? pluginOrName : pluginOrName?.name;
+    if (!pluginName) return;
+
+    // If it's an object, we can check has_config_screen.
+    // If it's a name, we just try to open it and let pluginSettingsStore handle errors.
+    if (typeof pluginOrName === "object" && !pluginOrName.has_config_screen)
+      return;
+
     try {
       if (!pluginSettingsStore?.openConfig) {
         throw new Error("Plugin settings store is unavailable.");
       }
-      await pluginSettingsStore.openConfig(plugin.name);
+      await pluginSettingsStore.openConfig(pluginName);
     } catch (e) {
       showErrorNotification(e, "Failed to open plugin config");
     }
@@ -167,8 +187,7 @@ const model = {
         doc: "readme",
       });
       if (response?.error) throw new Error(response.error);
-      const html = marked.parse(response.content || "", { breaks: true });
-      this.readmeContent = addBlankTargetsToLinks(html);
+      this.readmeContent = renderSafeMarkdown(response.content || "");
     } catch (e) {
       const error = e instanceof Error ? e : new Error(String(e));
       this.readmeError = error.message || "Failed to load README";
